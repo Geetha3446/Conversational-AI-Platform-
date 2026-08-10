@@ -1,0 +1,21 @@
+# secrets
+.env
+
+# data: local database, uploaded PDFs, FAISS indexes
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
