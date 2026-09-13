@@ -146,8 +146,8 @@ def render_sidebar() -> None:
             st.session_state.use_tools = st.toggle(
                 "Enable tools",
                 value=st.session_state.use_tools,
-                help="Document search, weather, Wikipedia, currency, calculator "
-                     "and clock. Turn off for a plain LLM chat.",
+                help="Document search, live web search, weather, and a "
+                     "calculator. Turn off for a plain LLM chat.",
             )
             ok, info = api_client.health()
             st.caption(f"Model: {info.get('model')}" if ok else "Backend offline")

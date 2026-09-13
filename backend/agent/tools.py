@@ -2,13 +2,17 @@
 Tools the agent can call.
 
 One of them (`search_my_documents`) is built per user by a factory, so the
-closure captures the authenticated user id. The rest hit free, key-free public
-APIs:
+closure captures the authenticated user id. The other two hit free, key-free
+public APIs:
 
-  * Open-Meteo          weather + geocoding      https://open-meteo.com
-  * Wikipedia REST      encyclopedia lookup      https://en.wikipedia.org/api/rest_v1
-  * open.er-api.com     currency exchange rates
-  * exec-free calculator using Python's ast module
+  * DuckDuckGo Instant Answer API   web lookups           https://api.duckduckgo.com
+  * Open-Meteo                      weather + geocoding   https://open-meteo.com
+
+Plus a basic four-operation calculator with no external dependency.
+
+The toolset is deliberately small: one tool per capability, no overlapping
+alternatives. Earlier revisions also included Wikipedia lookup, currency
+conversion, and a clock tool; they were cut to keep exactly these four.
 
 Every tool returns a plain string, catches its own exceptions and never raises,
 because a tool crash inside the graph would abort the user's whole turn.
@@ -16,9 +20,6 @@ because a tool crash inside the graph would abort the user's whole turn.
 
 from __future__ import annotations
 
-import ast
-import operator
-from datetime import datetime, timezone
 from typing import List
 
 import requests
@@ -130,252 +131,135 @@ def get_weather(city: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 3. Wikipedia lookup
+# 3. Web search (DuckDuckGo's official Instant Answer API, no API key)
 # ---------------------------------------------------------------------------
-@tool("search_wikipedia")
-def search_wikipedia(query: str) -> str:
-    """Look up factual background information on Wikipedia. Useful for people,
-    places, organisations, historical events and scientific concepts. Input
-    should be a short search phrase, not a full sentence."""
-    try:
-        hits = requests.get(
-            "https://en.wikipedia.org/w/api.php",
-            params={
-                "action": "query", "list": "search", "srsearch": query,
-                "srlimit": 2, "format": "json",
-            },
-            headers={"User-Agent": "ConversationalAIPlatform/1.0"},
-            timeout=HTTP_TIMEOUT,
-        ).json()
-
-        titles = [h["title"] for h in hits.get("query", {}).get("search", [])]
-        if not titles:
-            return f"Wikipedia has no article matching '{query}'."
-
-        summaries: List[str] = []
-        for title in titles:
-            resp = requests.get(
-                "https://en.wikipedia.org/api/rest_v1/page/summary/"
-                + requests.utils.quote(title.replace(" ", "_")),
-                headers={"User-Agent": "ConversationalAIPlatform/1.0"},
-                timeout=HTTP_TIMEOUT,
-            )
-            if resp.status_code != 200:
-                continue
-            data = resp.json()
-            extract = (data.get("extract") or "").strip()
-            if extract:
-                url = data.get("content_urls", {}).get("desktop", {}).get("page", "")
-                summaries.append(f"{data.get('title')}: {extract}\nSource: {url}")
-
-        return "\n\n".join(summaries) if summaries else "No usable summary found."
-    except Exception as exc:
-        return f"Wikipedia lookup failed: {exc}"
-
-
-# ---------------------------------------------------------------------------
-# 4. Currency conversion
-# ---------------------------------------------------------------------------
-@tool("convert_currency")
-def convert_currency(amount: float, from_currency: str, to_currency: str) -> str:
-    """Convert an amount of money between two currencies using live mid-market
-    rates. Currencies must be three-letter ISO codes such as USD, INR, EUR, JPY."""
-    try:
-        base = from_currency.strip().upper()
-        target = to_currency.strip().upper()
-        data = requests.get(
-            f"https://open.er-api.com/v6/latest/{base}", timeout=HTTP_TIMEOUT
-        ).json()
-
-        if data.get("result") != "success":
-            return f"Unknown or unsupported currency code '{base}'."
-
-        rate = data.get("rates", {}).get(target)
-        if rate is None:
-            return f"No exchange rate available for {base} to {target}."
-
-        converted = float(amount) * float(rate)
-        return (
-            f"{amount:,.2f} {base} = {converted:,.2f} {target} "
-            f"(rate 1 {base} = {rate:.4f} {target}, updated {data.get('time_last_update_utc')})"
-        )
-    except Exception as exc:
-        return f"Currency conversion failed: {exc}"
-
-
-# ---------------------------------------------------------------------------
-# 5. Web search (DuckDuckGo, no API key)
-# ---------------------------------------------------------------------------
-# The library formerly published as `duckduckgo-search` is now `ddgs`. It is
-# imported lazily inside the tool so that a missing or broken install degrades
-# to a clear message instead of breaking the whole agent at startup.
-
-def _ddgs_search(category: str, query: str, max_results: int) -> List[dict]:
-    """
-    Run a ddgs query, preferring the DuckDuckGo backend and falling back to the
-    library's automatic backend selection if DuckDuckGo returns nothing.
-
-    ddgs is a scraper, not an official API, so any single backend can go quiet
-    without warning. The fallback is what keeps the tool useful when that
-    happens. Raises on failure; the caller turns exceptions into text.
-    """
-    from ddgs import DDGS
-
-    with DDGS() as client:
-        method = getattr(client, category)
-        results = method(
-            query,
-            region="wt-wt",       # worldwide, no regional weighting
-            safesearch="moderate",
-            max_results=max_results,
-            backend="duckduckgo",
-        )
-        if not results:
-            results = method(
-                query,
-                region="wt-wt",
-                safesearch="moderate",
-                max_results=max_results,
-                backend="auto",   # bing, brave and others as a safety net
-            )
-    return results or []
-
-
-def _format_results(results: List[dict], limit: int) -> str:
-    """Render raw ddgs dicts into something an LLM can cite.
-
-    Different backends label the link differently, `href` on some and `url` on
-    others, so both are read.
-    """
-    lines: List[str] = []
-    for i, item in enumerate(results[:limit], start=1):
-        title = (item.get("title") or "Untitled").strip()
-        link = (item.get("href") or item.get("url") or "").strip()
-        body = (item.get("body") or item.get("excerpt") or "").strip()
-        date = (item.get("date") or "").strip()
-
-        header = f"[{i}] {title}"
-        if date:
-            header += f"  ({date})"
-        lines.append(f"{header}\n{body}\nSource: {link}")
-
-    return "\n\n".join(lines)
-
+# This is DuckDuckGo's own free, keyless JSON endpoint at api.duckduckgo.com,
+# not a scraper. Worth being upfront about what it actually is: DuckDuckGo's
+# own documentation is explicit that this is NOT a full search-results API.
+# It powers their "instant answer" knowledge panels, definitions, abstracts
+# and related topics, sourced from Wikipedia and similar. It answers "what is
+# FAISS" or "who is the CEO of X" well, and returns nothing for narrow,
+# highly specific, or purely news-style queries that would need a genuine
+# ranked list of articles. That tradeoff is accepted here in exchange for
+# using an endpoint DuckDuckGo actually supports, instead of scraping their
+# results page.
 
 @tool("web_search")
 def web_search(query: str) -> str:
-    """Search the live web via DuckDuckGo for current information. Use this for
-    anything recent, changing, or outside your training data: news, prices,
-    releases, current office holders, company details, sports results, or when
-    the user asks what is happening now. Prefer search_wikipedia for stable
-    encyclopedic background, and this tool for anything time-sensitive. Input
-    should be a focused search query, not a full sentence."""
+    """Search the web using DuckDuckGo's Instant Answer API for definitions,
+    factual lookups, and background on known people, places, organisations
+    and concepts. Best for "what is" / "who is" style questions about
+    established topics. It does not return a ranked list of articles, so it
+    may return nothing for very narrow, obscure, or breaking-news queries;
+    if that happens, say so and answer from existing knowledge. Input should
+    be a short, focused search phrase."""
     try:
-        results = _ddgs_search("text", query, max_results=6)
-    except ImportError:
-        return (
-            "Web search is unavailable because the 'ddgs' package is not "
-            "installed. Run: pip install ddgs"
+        response = requests.get(
+            "https://api.duckduckgo.com/",
+            params={
+                "q": query,
+                "format": "json",
+                "no_html": 1,
+                "skip_disambig": 1,
+                "no_redirect": 1,
+            },
+            headers={"User-Agent": "ConversationalAIPlatform/1.0"},
+            timeout=HTTP_TIMEOUT,
         )
+        response.raise_for_status()
+        data = response.json()
+    except requests.Timeout:
+        return "The web search timed out. Answer from existing knowledge and say so."
     except Exception as exc:
-        name = type(exc).__name__
-        if "Ratelimit" in name:
-            return (
-                "DuckDuckGo is rate limiting this client right now. Tell the user "
-                "to try again shortly, and answer from what you already know."
-            )
-        if "Timeout" in name:
-            return "The web search timed out. Answer from existing knowledge and say so."
-        return f"Web search failed ({name}): {exc}"
+        return f"Web search failed ({type(exc).__name__}): {exc}"
 
-    if not results:
+    sections: List[str] = []
+
+    # A direct instant answer, e.g. simple calculations or quick facts.
+    if data.get("Answer"):
+        sections.append(f"Direct answer: {data['Answer']}")
+
+    # A dictionary-style definition.
+    if data.get("Definition"):
+        source = data.get("DefinitionSource", "")
+        sections.append(f"Definition ({source}): {data['Definition']}")
+
+    # The main encyclopedic abstract, usually sourced from Wikipedia.
+    if data.get("AbstractText"):
+        heading = data.get("Heading") or query
+        source = data.get("AbstractSource", "")
+        url = data.get("AbstractURL", "")
+        sections.append(
+            f"{heading} ({source}): {data['AbstractText']}\nSource: {url}"
+        )
+
+    # Related topics as a supplementary list, when present.
+    related_lines: List[str] = []
+    for item in data.get("RelatedTopics", [])[:5]:
+        text = item.get("Text")
+        url = item.get("FirstURL")
+        if text and url:
+            related_lines.append(f"- {text}\n  Source: {url}")
+    if related_lines:
+        sections.append("Related topics:\n" + "\n".join(related_lines))
+
+    if not sections:
         return (
-            f"No web results for '{query}'. Try a shorter or differently worded "
-            "query, or answer from existing knowledge and say the search came back empty."
+            f"DuckDuckGo's instant answer API returned nothing for '{query}'. "
+            "This endpoint only covers known topics and entities, not a general "
+            "web crawl, so try a more specific or well-known term, or answer "
+            "from existing knowledge and say the search came back empty."
         )
 
     return (
-        f"Live DuckDuckGo results for '{query}'. Cite the source URLs you use, "
-        "and note that snippets may be incomplete.\n\n"
-        + _format_results(results, limit=6)
-    )
-
-
-@tool("news_search")
-def news_search(query: str) -> str:
-    """Search recent news articles via DuckDuckGo, returning headlines with
-    publication dates. Use this instead of web_search when the user explicitly
-    asks about news, current events, or what has happened recently on a topic.
-    Input should be a short topic or entity name."""
-    try:
-        results = _ddgs_search("news", query, max_results=6)
-    except ImportError:
-        return (
-            "News search is unavailable because the 'ddgs' package is not "
-            "installed. Run: pip install ddgs"
-        )
-    except Exception as exc:
-        name = type(exc).__name__
-        if "Ratelimit" in name:
-            return "DuckDuckGo is rate limiting this client right now. Try again shortly."
-        return f"News search failed ({name}): {exc}"
-
-    if not results:
-        return f"No recent news found for '{query}'."
-
-    return (
-        f"Recent news matching '{query}', newest first where available. Cite the "
-        "source URLs and mention publication dates.\n\n"
-        + _format_results(results, limit=6)
+        f"DuckDuckGo instant answer results for '{query}'. Cite the sources "
+        "given, and note this covers known topics/entities rather than a "
+        "full web crawl, so treat it as a starting point rather than "
+        "exhaustive.\n\n" + "\n\n".join(sections)
     )
 
 
 # ---------------------------------------------------------------------------
-# 6. Safe calculator
+# 4. Calculator (basic arithmetic only)
 # ---------------------------------------------------------------------------
-_ALLOWED_OPS = {
-    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
-    ast.Div: operator.truediv, ast.Pow: operator.pow, ast.Mod: operator.mod,
-    ast.FloorDiv: operator.floordiv, ast.USub: operator.neg, ast.UAdd: operator.pos,
+_OPERATIONS = {
+    "add": lambda a, b: a + b, "+": lambda a, b: a + b,
+    "subtract": lambda a, b: a - b, "-": lambda a, b: a - b,
+    "multiply": lambda a, b: a * b, "*": lambda a, b: a * b, "x": lambda a, b: a * b,
+    "divide": lambda a, b: a / b, "/": lambda a, b: a / b,
 }
-
-
-def _safe_eval(node: ast.AST) -> float:
-    """Walk the AST and evaluate only arithmetic. No names, calls or attributes."""
-    if isinstance(node, ast.Expression):
-        return _safe_eval(node.body)
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-        return node.value
-    if isinstance(node, ast.BinOp) and type(node.op) in _ALLOWED_OPS:
-        return _ALLOWED_OPS[type(node.op)](_safe_eval(node.left), _safe_eval(node.right))
-    if isinstance(node, ast.UnaryOp) and type(node.op) in _ALLOWED_OPS:
-        return _ALLOWED_OPS[type(node.op)](_safe_eval(node.operand))
-    raise ValueError("Only plain arithmetic is allowed")
+_SYMBOLS = {"add": "+", "subtract": "-", "multiply": "*", "divide": "/"}
 
 
 @tool("calculator")
-def calculator(expression: str) -> str:
-    """Evaluate an arithmetic expression precisely. Use this instead of doing
-    mental maths for anything non-trivial. Supports + - * / // % and **,
-    for example "1580 * 1.18" or "(45000 - 12000) / 12"."""
+def calculator(a: float, b: float, operation: str) -> str:
+    """Perform one basic arithmetic operation between two numbers. operation
+    must be one of: add, subtract, multiply, divide (the symbols +, -, *, /
+    are also accepted). For a multi-step calculation, call this tool more
+    than once, one operation at a time."""
     try:
-        parsed = ast.parse(expression, mode="eval")
-        result = _safe_eval(parsed)
-        return f"{expression} = {result:,}"
-    except Exception as exc:
-        return f"Could not evaluate '{expression}': {exc}"
+        a = float(a)
+        b = float(b)
+    except (TypeError, ValueError):
+        return f"Could not parse numbers: a={a!r}, b={b!r}"
 
+    op_key = operation.strip().lower()
+    func = _OPERATIONS.get(op_key)
+    if func is None:
+        return (
+            f"Unknown operation '{operation}'. Use add, subtract, multiply, "
+            "or divide (or +, -, *, /)."
+        )
 
-# ---------------------------------------------------------------------------
-# 7. Current date and time
-# ---------------------------------------------------------------------------
-@tool("get_current_datetime")
-def get_current_datetime() -> str:
-    """Return the current UTC date, time and weekday. Call this before doing any
-    reasoning that depends on today's date, since the model's own sense of
-    'today' is unreliable."""
-    now = datetime.now(timezone.utc)
-    return now.strftime("Current UTC datetime: %A, %d %B %Y, %H:%M:%S UTC")
+    if op_key in ("divide", "/") and b == 0:
+        return "Cannot divide by zero."
+
+    result = func(a, b)
+    symbol = _SYMBOLS.get(op_key, op_key)
+    # Whole-number results print as "175,500" rather than "175,500.0", matching
+    # how the operands themselves are already formatted with {:g}.
+    result_str = f"{result:,.0f}" if result == int(result) else f"{result:,}"
+    return f"{a:g} {symbol} {b:g} = {result_str}"
 
 
 # ---------------------------------------------------------------------------
@@ -383,12 +267,8 @@ def get_current_datetime() -> str:
 # ---------------------------------------------------------------------------
 PUBLIC_TOOLS: List[BaseTool] = [
     web_search,
-    news_search,
     get_weather,
-    search_wikipedia,
-    convert_currency,
     calculator,
-    get_current_datetime,
 ]
 
 

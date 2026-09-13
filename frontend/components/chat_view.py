@@ -23,13 +23,9 @@ STARTERS: List[dict] = [
     {"icon": "[sun]",  "title": "Live weather",
      "prompt": "What is the weather in Patna right now, and should I carry an umbrella?"},
     {"icon": "[web]",  "title": "Live web search",
-     "prompt": "Search the web and tell me the latest news about AI model releases this week."},
-    {"icon": "[fx]",   "title": "Currency",
-     "prompt": "Convert 1500 USD to INR and tell me today's rate."},
+     "prompt": "Search the web and give me a quick summary of what FAISS is."},
     {"icon": "[calc]", "title": "Number crunching",
-     "prompt": "If I invest 25000 a month at 12 percent annual return, what is the value after 10 years?"},
-    {"icon": "[wiki]", "title": "Research",
-     "prompt": "Explain retrieval augmented generation and where it came from."},
+     "prompt": "Add 128000 and 47500, then tell me the result."},
 ]
 
 

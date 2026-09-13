@@ -209,41 +209,55 @@ returned score exactly cosine similarity. The retrieval tool is built by a
 factory that captures the authenticated user id in a closure, so the model
 cannot be prompted into reading another user's files: the user id is never one
 of the tool's arguments.
-
 ### 4.5 Tools available to the model
 
 | Tool | Source | Key needed |
 |---|---|---|
 | `search_my_documents` | The user's own FAISS index | No |
-| `web_search` | DuckDuckGo via the `ddgs` package | No |
-| `news_search` | DuckDuckGo news via `ddgs` | No |
+| `web_search` | DuckDuckGo's official Instant Answer API | No |
 | `get_weather` | Open-Meteo geocoding + forecast | No |
-| `search_wikipedia` | Wikipedia REST API | No |
-| `convert_currency` | open.er-api.com | No |
-| `calculator` | Python `ast`, arithmetic only, no `eval` | No |
-| `get_current_datetime` | Local clock | No |
+| `calculator` | Plain Python, four basic operations, no expression parsing | No |
+
+This is a deliberately small toolset, one tool per capability, no overlapping
+alternatives. Earlier revisions also had Wikipedia lookup, currency
+conversion, and a clock tool; they were cut down to exactly these four.
 
 Every tool catches its own exceptions and returns a string, because an
 unhandled tool error inside the graph would abort the user's whole turn.
 
-**A caveat on web search specifically.** `ddgs`, formerly published as
-`duckduckgo-search`, scrapes search result pages rather than calling an official
-API. There is no supported free DuckDuckGo web search API, so this is the
-practical option, and it comes with real consequences:
+**A caveat on web search specifically.** `web_search` calls
+`api.duckduckgo.com`, which is DuckDuckGo's own free, keyless JSON endpoint,
+not a scraper. That is a deliberate tradeoff worth being upfront about:
+DuckDuckGo's own documentation states plainly that this is **not a full
+search-results API**. It powers their "instant answer" knowledge panels,
+definitions, entity abstracts and related topics, sourced from Wikipedia and
+similar. Practically:
 
-- Queries can be rate limited, especially in bursts. The tool detects this and
-  returns a message telling the model to say so rather than inventing an answer.
-- Upstream HTML changes can break parsing without warning. Pin the version and
-  expect to bump it occasionally.
-- `backend="duckduckgo"` is tried first, with the library's `auto` mode as a
-  fallback, which may quietly serve results from Bing or Brave instead. If
-  strictly DuckDuckGo results matter to you, remove the fallback in
-  `_ddgs_search`.
+- It answers "what is X" and "who is X" well for established topics, people,
+  organisations and concepts.
+- It returns nothing useful for narrow, highly specific, or breaking-news
+  queries that would need a genuine ranked list of articles. The tool detects
+  an empty result and returns an honest message rather than letting the model
+  invent an answer.
+- There is no distinct "news" mode on this endpoint, which is why there is a
+  single `web_search` tool rather than a separate one for news.
 
-For anything where reliability is load-bearing, swap in a paid search API. The
-tool interface stays identical; only the body of `_ddgs_search` changes.
+If you need actual ranked web results or news coverage, the practical options
+are a scraping library such as `ddgs` (fragile, breaks on upstream HTML
+changes, works better for exactly the queries this endpoint struggles with) or
+a paid search API (Bing Web Search, SerpAPI, Tavily). Either swap only changes
+the body of `web_search` in `backend/agent/tools.py`; the tool's name and
+signature can stay the same.
+
+**A note on the calculator.** It takes two numbers and one operation, `add`,
+`subtract`, `multiply`, or `divide` (the symbols `+ - * /` are also accepted),
+rather than parsing an arbitrary expression string. For a multi-step
+calculation the model is instructed to call it more than once, one operation
+at a time. This trades a little flexibility for a tool that is trivial to
+reason about and has no parsing surface at all.
 
 ---
+
 
 ## 5. Bulk PDF ingestion
 
